@@ -16,7 +16,7 @@ Give an AI agent (or any program) its own private balance on Robinhood Chain. Ho
 **Claude Code** (skill + MCP server in one plugin):
 
 ```
-/plugin install lincoln --marketplace LincolnProtocol-com/sdk
+/plugin install lincoln --marketplace lincoln-protocol/sdk
 ```
 
 Then create the wallet (`npx @lincolnprotocol/cli init`, below) and start Claude Code with `LINCOLN_PASSPHRASE` set in its environment.

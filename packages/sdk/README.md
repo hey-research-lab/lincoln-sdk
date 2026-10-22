@@ -13,4 +13,4 @@ const r = await agent.execute(q.id);             // { txHash, jobId, explorer, m
 
 Pool profiles, swap routes and circuit pins ship with the package, so a relay can't redirect funds. Create the wallet with `npx @lincolnprotocol/cli init`.
 
-Docs: https://docs.lincolnprotocol.com/developers/agents · Source: https://github.com/LincolnProtocol-com/sdk · Terms: https://docs.lincolnprotocol.com/legal/terms
+Docs: https://docs.lincolnprotocol.com/developers/agents · Source: https://github.com/lincoln-protocol/sdk · Terms: https://docs.lincolnprotocol.com/legal/terms
