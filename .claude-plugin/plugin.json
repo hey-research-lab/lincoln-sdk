@@ -7,7 +7,7 @@
     "url": "https://lincolnprotocol.com"
   },
   "homepage": "https://docs.lincolnprotocol.com/developers/agents",
-  "repository": "https://github.com/LincolnProtocol-com/sdk",
+  "repository": "https://github.com/lincoln-protocol/sdk",
   "license": "Apache-2.0",
   "keywords": [
     "privacy",

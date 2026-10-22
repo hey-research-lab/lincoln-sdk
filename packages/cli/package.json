@@ -14,11 +14,11 @@
   "homepage": "https://docs.lincolnprotocol.com/developers/agents",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LincolnProtocol-com/sdk.git",
+    "url": "git+https://github.com/lincoln-protocol/sdk.git",
     "directory": "packages/cli"
   },
   "bugs": {
-    "url": "https://github.com/LincolnProtocol-com/sdk/issues"
+    "url": "https://github.com/lincoln-protocol/sdk/issues"
   },
   "type": "module",
   "bin": {

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "MCP server for Lincoln: give an AI agent a private balance on Robinhood Chain.",
-  "mcpName": "io.github.LincolnProtocol-com/lincoln",
+  "mcpName": "io.github.lincoln-protocol/lincoln",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -16,11 +16,11 @@
   "homepage": "https://docs.lincolnprotocol.com/developers/agents",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LincolnProtocol-com/sdk.git",
+    "url": "git+https://github.com/lincoln-protocol/sdk.git",
     "directory": "packages/mcp"
   },
   "bugs": {
-    "url": "https://github.com/LincolnProtocol-com/sdk/issues"
+    "url": "https://github.com/lincoln-protocol/sdk/issues"
   },
   "type": "module",
   "bin": {

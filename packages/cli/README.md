@@ -15,4 +15,4 @@ lincoln withdraw 0.1 eth 0xabc… --to base
 
 Every spend is quote → confirm → execute, checked against `~/.lincoln/policy.json`. `--json` prints machine-readable output for agents.
 
-Docs: https://docs.lincolnprotocol.com/developers/agents · Source: https://github.com/LincolnProtocol-com/sdk · Terms: https://docs.lincolnprotocol.com/legal/terms
+Docs: https://docs.lincolnprotocol.com/developers/agents · Source: https://github.com/lincoln-protocol/sdk · Terms: https://docs.lincolnprotocol.com/legal/terms

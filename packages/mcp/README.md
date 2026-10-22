@@ -30,4 +30,4 @@ Tools: `lincoln_balance`, `lincoln_address`, `lincoln_pools`, `lincoln_policy`, 
 
 Spends are checked against `~/.lincoln/policy.json` (per-transaction, daily and approval limits). Those limits are enforced by this software, not by the contracts, so keep only what the agent needs in its balance.
 
-Docs: https://docs.lincolnprotocol.com/developers/agents · Source: https://github.com/LincolnProtocol-com/sdk · Terms: https://docs.lincolnprotocol.com/legal/terms
+Docs: https://docs.lincolnprotocol.com/developers/agents · Source: https://github.com/lincoln-protocol/sdk · Terms: https://docs.lincolnprotocol.com/legal/terms
