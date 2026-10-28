@@ -20,7 +20,13 @@ interface Common {
   persist?: (account: sdk.Account) => void | Promise<void>;
   /** The job ID, as soon as the relay has it: follow it with `status` if this process stops. */
   onSubmitted?: (ref: { hash?: Hex; jobId?: string }) => void;
+  /** Season points (core/season.ts): names a claimant for this relay job, and hears about it once confirmed. */
+  points?: PointsHooks | null;
 }
+
+/** Season points: `claim` is asked once per operation and may name a claimant for the relay job; `confirmed` hears about
+ *  each confirmed job that carried one, to collect its receipt. A failing hook never blocks or fails an operation. */
+export interface PointsHooks { claim(pool: PoolId, kind: JobKind): Promise<{ claimant: string } | null>; confirmed(pool: PoolId, jobId: string): void | Promise<void> }
 
 /** Public deposit from `wallet` with an amount-independent invoice that only `account` can decrypt. */
 export async function deposit({ account, pool, amount, wallet, onStage, onSubmitted }: Common & { amount: bigint; wallet: WalletClient }): Promise<OpResult> {
@@ -83,7 +89,7 @@ export function recoveryOf(e: RelayError): 'unused' | 'identical' | 'terminal' |
   return 'uncertain';
 }
 
-async function relayed(pool: PoolId, kind: JobKind, circuit: Circuit, onStage: Common['onStage'], onSubmitted: Common['onSubmitted'],
+async function relayed(pool: PoolId, kind: JobKind, circuit: Circuit, { onStage, onSubmitted, points: hooks }: Pick<Common, 'onStage' | 'onSubmitted' | 'points'>,
   build: (state: PoolState, fee: bigint) => Built, pricing?: Pricing,
 ): Promise<OpResult> {
   // A pool whose relay is not configured yet (relayer null in its profile) takes deposits only.
@@ -91,6 +97,8 @@ async function relayed(pool: PoolId, kind: JobKind, circuit: Circuit, onStage: C
   // One ID per transaction: reused while the relay confirms it never stored a job, replaced only after a proven stop.
   let id = newJobId();
   let priced: PricedFee | null = pricing?.hint ?? null, floor = 0n, locked: bigint | null = null;
+  // Asked once: every retry of this operation sends the same request, `points` included.
+  const points = hooks ? await Promise.resolve().then(() => hooks.claim(pool, kind)).catch(() => null) : null;
   const quote = async (outputs: number) => {
     const next = await priceFee(pool, pricing!.kind, pricing!.gross, { outputCount: outputs, gasUnits: floor || undefined });
     if (locked !== null && next.fee !== locked) throw new RelayError('FEE_CHANGED');
@@ -143,7 +151,7 @@ async function relayed(pool: PoolId, kind: JobKind, circuit: Circuit, onStage: C
     onStage?.('save');
     await beforeSubmit?.();
     onStage?.('relay');
-    const body = { id, kind, ...(routeId ? { routeId } : {}), ...(priced?.quote ? { feeQuoteId: priced.quote.quoteId } : {}), transaction: transaction(proof) };
+    const body = { id, kind, ...(routeId ? { routeId } : {}), ...(priced?.quote ? { feeQuoteId: priced.quote.quoteId } : {}), ...(points ? { points } : {}), transaction: transaction(proof) };
     let unsure = false, reprove = false;
     for (let again = 0; ; again++) {
       try { await submitJob(pool, body); break; }
@@ -169,6 +177,7 @@ async function relayed(pool: PoolId, kind: JobKind, circuit: Circuit, onStage: C
     onSubmitted?.({ jobId: id });
     onStage?.('confirm');
     const job = await waitForJob(pool, id, { unsure });
+    if (points) await Promise.resolve().then(() => hooks!.confirmed(pool, id)).catch(() => undefined);
     onStage?.('done');
     return { hash: job.hash as Hex, jobId: id };
   }
@@ -182,7 +191,7 @@ function requireApprovedSet(state: PoolState) {
 /** `recipient` may be resolved from the final fee (a bridge or NEAR Intents deposit address quoted for exactly
  *  `amount − fee`); it is called once, before the first proof, and the fee is then fixed. `fee` is a fee already
  *  priced for this spend (tried first); `maxFee` the most the user approved. */
-export async function spend({ account, pool, amount, recipient, receiver, fee: hint, maxFee, onStage, persist, onSubmitted }: Common & {
+export async function spend({ account, pool, amount, recipient, receiver, fee: hint, maxFee, onStage, persist, onSubmitted, points }: Common & {
   amount: bigint; recipient?: string | ((fee: bigint) => Promise<string>); receiver?: sdk.Receiver; fee?: PricedFee; maxFee?: bigint }) {
   const info = POOLS[pool];
   // A recipient does not change the transaction's shape, so a resolver's address is settled with a stand-in.
@@ -190,7 +199,7 @@ export async function spend({ account, pool, amount, recipient, receiver, fee: h
   const lock = typeof recipient === 'function' ? async (fee: bigint) => { to = await recipient(fee); } : undefined;
   // The relay checks the fee to the unit, so prove exactly its schedule's fee, or the quote it just gave.
   const pricing: Pricing = receiver ? { kind: 'private-transfer', gross: 0n, hint, maxFee } : { kind: 'withdrawal', gross: amount, hint, maxFee, lock };
-  return relayed(pool, 'transact', 'joinsplit', onStage, onSubmitted, (state, fee) => {
+  return relayed(pool, 'transact', 'joinsplit', { onStage, onSubmitted, points }, (state, fee) => {
     requireApprovedSet(state);
     if (fee >= amount && !receiver) throw new Error('Amount is too small to cover the relayer fee.');
     const prepared = sdk.prepareJoinSplit({
@@ -212,10 +221,10 @@ export async function spend({ account, pool, amount, recipient, receiver, fee: h
 }
 
 /** Public exit of one whole note (holder exit, or ragequit back to the depositing address). */
-export async function exitNote({ account, pool, note, recipient, ragequit = false, onStage, onSubmitted }: Common & { note: sdk.Note; recipient?: string; ragequit?: boolean }) {
+export async function exitNote({ account, pool, note, recipient, ragequit = false, onStage, onSubmitted, points }: Common & { note: sdk.Note; recipient?: string; ragequit?: boolean }) {
   const info = POOLS[pool];
   // Ragequit is free and unpriced; a holder exit pays from the note it reveals.
-  return relayed(pool, ragequit ? 'ragequit' : 'holderExit', 'holder-exit', onStage, onSubmitted, (state, fee) => {
+  return relayed(pool, ragequit ? 'ragequit' : 'holderExit', 'holder-exit', { onStage, onSubmitted, points }, (state, fee) => {
     const prepared = ragequit
       ? sdk.prepareRagequit({ account, profile: info.profile, note, state, processor: info.relayer })
       : sdk.prepareHolderExit({ account, profile: info.profile, note, state, externalData: { processor: info.relayer, recipient: recipient!, feeRecipient: fee > 0n ? info.relayer : ZERO, fee } });
@@ -226,10 +235,10 @@ export async function exitNote({ account, pool, note, recipient, ragequit = fals
 export const getQuote = (pool: PoolId, routeId: string, amountIn: bigint, slippageBPS = 100): Promise<Quote> => relayQuote(pool, routeId, amountIn, slippageBPS);
 
 /** Private swap: spends notes in `pool`, routes through the DEX adapter and re-enters the target pool as a new note. */
-export function swap({ account, pool, routeId, quote, onStage, persist, onSubmitted }: Common & { routeId: string; quote: Quote }) {
+export function swap({ account, pool, routeId, quote, onStage, persist, onSubmitted, points }: Common & { routeId: string; quote: Quote }) {
   const info = POOLS[pool], entry = info.routes.find(r => r.id === routeId);
   if (!entry) throw new Error('Unknown route.');
-  return relayed(pool, 'swap', 'joinsplit', onStage, onSubmitted, state => {
+  return relayed(pool, 'swap', 'joinsplit', { onStage, onSubmitted, points }, state => {
     requireApprovedSet(state);
     if (BigInt(quote.deadline) <= BigInt(state.blockTimestamp)) throw new RelayError('EXPIRED_SWAP');
     const common = { account, sourceProfile: info.profile, targetProfile: POOLS[entry.target].profile, sourceState: state, route: entry.route, minChange: minChangeFor(info) };

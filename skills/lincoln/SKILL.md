@@ -35,7 +35,15 @@ You control a private balance in Lincoln, a privacy pool on Robinhood Chain. You
 | "Send 0.1 ETH to 0xabc on Base" | `lincoln quote withdraw 0.1 eth 0xabc… --to base --json` → confirm → `lincoln execute <id>` |
 | "Send 0.1 ETH to 0xabc on Arbitrum as WBTC" | `lincoln quote withdraw 0.1 eth 0xabc… --to arbitrum --receive wbtc --json` → confirm → `lincoln execute <id>` |
 | "Send 0.05 ETH to my Zcash address t1…" | `lincoln quote withdraw 0.05 eth t1… --to zcash --refund <fresh 0x on Robinhood Chain> --json` → confirm → `lincoln execute <id>` (ask the user for the refund address) |
+| "How many points do you have?" | `lincoln points --json`; report points, projected LINCOLN (a preview) and whether points are on; add that points are not tokens or a promise of payout |
 | "Send everything back to me" | Ask for the user's `lincoln3:` address; quote a private send of the ready balance |
+
+## Season points
+
+- LINCOLN season-1 points are **opt-in** through `"seasonPoints": true` in `~/.lincoln/policy.json`. It is off by default. Never turn it on, never edit the policy file, and never suggest editing it as a way to "earn" anything without explaining the trade-off.
+- Trade-off to tell the user: while it is on, every fee-paying spend names the wallet's points ID (derived from the private seed, not the public wallet). The points service publishes that ID's points and each receipt links its job to the ID, so all of your fee-paying spends become linkable to each other (not to the user's public wallet).
+- `lincoln points --json` (or `lincoln_points`) shows the points ID, whether points are on, points, fee events, projected LINCOLN and receipts still pending. Receipts are collected automatically; points never block or fail a spend, so don't retry a spend over points.
+- Points are not tokens and not a promise of payout. Rules: https://docs.lincolnprotocol.com/token/points
 
 ## Privacy tips to apply
 

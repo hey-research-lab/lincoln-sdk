@@ -14,10 +14,16 @@ export interface Policy {
   /** Allowed recipients (lincoln3: or 0x addresses). Empty allows any. */
   allowedRecipients: string[];
   allowedActions: ('send' | 'swap' | 'withdraw' | 'deposit')[];
+  /** LINCOLN season points (https://docs.lincolnprotocol.com/token/points): relay jobs that pay a fee name this wallet's
+   *  points ID, so they earn points. Off by default; only the user turns it on. Trade-off: the points service publishes
+   *  each points ID's points, and every receipt links its job to the points ID, so all of the agent's fee-paying jobs
+   *  become linkable to each other (not to the user's public wallet). Points are not tokens and not a promise of payout. */
+  seasonPoints: boolean;
 }
 
 export const DEFAULT_POLICY: Policy = {
   perTransactionUsd: 250, dailyUsd: 1000, approvalAboveUsd: 100, allowedRecipients: [], allowedActions: ['send', 'swap', 'withdraw', 'deposit'],
+  seasonPoints: false,
 };
 
 export async function readPolicy(file: string): Promise<Policy> {
@@ -25,6 +31,8 @@ export async function readPolicy(file: string): Promise<Policy> {
   if (!text) return DEFAULT_POLICY;
   const p = { ...DEFAULT_POLICY, ...JSON.parse(text) } as Policy;
   for (const k of ['perTransactionUsd', 'dailyUsd', 'approvalAboveUsd'] as const) if (!(typeof p[k] === 'number' && p[k] >= 0)) throw new Error(`policy.json: ${k} must be a number ≥ 0.`);
+  // Absent (policy files written before season points) means off.
+  if (typeof p.seasonPoints !== 'boolean') throw new Error('policy.json: seasonPoints must be true or false.');
   return p;
 }
 export const writeDefaultPolicy = (file: string) => writePrivate(file, JSON.stringify(DEFAULT_POLICY, null, 2) + '\n');

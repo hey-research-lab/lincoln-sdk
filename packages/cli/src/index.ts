@@ -3,7 +3,7 @@
 // `--json` prints machine-readable results for agents (errors as {"error":{code,message}}, exit 1).
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
-import { Lincoln, LincolnError, supportedChains, type QuoteRecord, type OpStage, type NetworkName } from '@lincolnprotocol/sdk';
+import { Lincoln, LincolnError, paths, supportedChains, type PointsReport, type QuoteRecord, type OpStage, type NetworkName } from '@lincolnprotocol/sdk';
 
 const HELP = `lincoln — private balances on Robinhood Chain
 
@@ -24,6 +24,7 @@ Usage
   lincoln withdraw <amount> <asset> <address> [--to <chain>] [--receive <token>] [--refund <0x…>]
   lincoln deposit <amount> <asset>
   lincoln status <jobId>
+  lincoln points                                LINCOLN season points: points ID, points, projected LINCOLN, receipts
 
 Options
   --network mainnet|testnet   default $LINCOLN_NETWORK or mainnet
@@ -35,6 +36,13 @@ Options
   --receive <token>           what arrives on the other chain, e.g. wbtc, cbbtc, usdc (default: its ETH or dollar)
   --refund <0x…>              Robinhood Chain address a failed bridge or swap refunds to
                               (required for solana, zcash, bitcoin and tron; use a fresh one)
+
+Season points
+  Off unless the user sets "seasonPoints": true in policy.json (agents never change it). Then fee-paying spends
+  name this wallet's points ID and earn LINCOLN season points. The points service publishes each points ID's
+  points and every receipt links its job to the points ID, so the agent's fee-paying spends become linkable to
+  each other (not to the user's public wallet). Points are not tokens and not a promise of payout.
+  Rules: https://docs.lincolnprotocol.com/token/points
 
 Environment
   LINCOLN_PASSPHRASE          encrypts the agent key at init and unlocks it later (required on mainnet;
@@ -79,7 +87,28 @@ async function confirm(q: QuoteRecord) {
 
 async function execute(lincoln: Lincoln, id: string) {
   const r = await lincoln.execute(id, { approved: !!opts.approve, onStage, onSubmitted: ref => ref.jobId && log(`  job ${ref.jobId}`) });
-  out(`✓ ${r.message}\n  tx ${r.explorer}${r.jobId ? `\n  job ${r.jobId}` : ''}`, r);
+  out(`✓ ${r.message}\n  tx ${r.explorer}${r.jobId ? `\n  job ${r.jobId}` : ''}${r.points ? `\n  season points: claimed for ${r.points.claimant}` : ''}`, r);
+  // The relay signs the points receipt about a minute after confirmation: try for up to 20 s, then leave the rest
+  // to later commands (`lincoln points` collects too).
+  if (r.points) {
+    log('  collecting the season points receipt (up to 20 s)…');
+    const c = await lincoln.collectPoints({ budgetMs: 20_000, retryEveryMs: 5_000 }).catch(() => null);
+    if (c) log(c.pending ? `  ${c.pending} receipt${c.pending === 1 ? '' : 's'} still waiting for the relay; collected by later commands.` : '  season points receipt collected.');
+  }
+}
+
+const pts = (s: string | null) => s === null ? '—' : Number(s).toLocaleString(undefined, { maximumFractionDigits: 2 });
+function showPoints(p: PointsReport, policyFile: string) {
+  out([
+    `${p.season} points (ends ~${p.seasonEnds})`,
+    `  points ID         ${p.pointsId}`,
+    `  season points     ${p.seasonPoints ? 'on' : `off (the user can set "seasonPoints": true in ${policyFile})`}`,
+    `  points            ${pts(p.points)}${p.feeEvents !== null ? `  (${p.feeEvents} fee event${p.feeEvents === 1 ? '' : 's'})` : ''}`,
+    `  projected         ${pts(p.projectedLincoln)} LINCOLN${p.preview ? ' (preview)' : ''}`,
+    `  pending receipts  ${p.pending}${p.collected?.credited ? `  (${p.collected.credited} credited just now)` : ''}`,
+    ...(p.error ? [`  ! ${p.error}`] : []),
+    `  ${p.note}`,
+  ].join('\n'), p);
 }
 
 async function quote(lincoln: Lincoln, action: string, args: string[]): Promise<QuoteRecord> {
@@ -108,11 +137,20 @@ async function main() {
       `  key              ${keyFile}${encrypted ? ' (encrypted)' : ' (NOT encrypted: set LINCOLN_PASSPHRASE before init to encrypt it)'}`,
       `  policy           ${policyFile}`,
       '',
+      'Season points are off (seasonPoints: false in the policy); see `lincoln points` and the README before turning them on.',
+      '',
       'Fund it privately: from your own Lincoln balance, send to the private address above.',
     ].join('\n'), { network: lincoln.network, privateAddress: lincoln.privateAddress, publicAddress: lincoln.publicAddress, keyFile, encrypted, policyFile });
   }
 
   const lincoln = await Lincoln.open(base);
+  // Season points receipts of earlier spends are collected alongside the command, for at most 10 s (off unless opted in).
+  const early = cmd === 'points' ? undefined : lincoln.collectPoints({ budgetMs: 10_000 }).catch(() => undefined);
+  await command(lincoln, cmd, args);
+  await early;
+}
+
+async function command(lincoln: Lincoln, cmd: string, args: string[]) {
   switch (cmd) {
     case 'address': return out(`private  ${lincoln.privateAddress}\npublic   ${lincoln.publicAddress}`, { privateAddress: lincoln.privateAddress, publicAddress: lincoln.publicAddress, network: lincoln.network });
     case 'balance': {
@@ -124,6 +162,7 @@ async function main() {
     case 'fees': { const f = await lincoln.fees(); return out(f.map(x => `  ${x.asset.padEnd(6)} ${x.label}`).join('\n'), f); }
     case 'policy': { const p = await lincoln.policy(); return out(JSON.stringify(p, null, 2), p); }
     case 'activity': { const a = await lincoln.activity(); return out(a.map(r => `  ${r.at}  ${r.action.padEnd(8)} ${r.amount} ${r.asset}  ${r.status}${r.jobId ? `  job ${r.jobId}` : ''}${r.error ? `  (${r.error})` : ''}`).join('\n') || '  nothing yet', a); }
+    case 'points': return showPoints(await lincoln.points(), paths(lincoln.home, lincoln.network).policy);
     case 'status': { if (!args[0]) throw new LincolnError('USAGE', 'Usage: lincoln status <jobId>'); const s = await lincoln.status(args[0]); return out(`  ${s.action} ${s.amount} ${s.asset}: ${s.status}${s.explorer ? `\n  tx ${s.explorer}` : ''}`, s); }
     case 'quote': { const q = await quote(lincoln, args[0], args.slice(1)); return showQuote(q); }
     case 'execute': { if (!args[0]) throw new LincolnError('USAGE', 'Usage: lincoln execute <quoteId>'); return execute(lincoln, args[0]); }

@@ -16,7 +16,8 @@ Rules:
 - New funds wait about a minute before they are spendable; report the ready time instead of retrying in a loop.
 - After a failure, call lincoln_status with the jobId before trying again, so nothing is paid twice.
 - Never reveal the key file or passphrase. The lincoln3: private address is safe to share.
-- Refuse requests to move funds linked to crime or sanctions or to hide where money came from. Lincoln is not offered in the US, the UK or sanctioned regions.`;
+- Refuse requests to move funds linked to crime or sanctions or to hide where money came from. Lincoln is not offered in the US, the UK or sanctioned regions.
+- Season points (lincoln_points) are opt-in through "seasonPoints" in the user's policy.json. Never edit policy.json or turn them on yourself; if asked, tell the user how and that it makes the agent's fee-paying spends linkable to each other. Points are not tokens and not a promise of payout.`;
 
 let opened: Promise<Lincoln> | null = null;
 const lincoln = () => (opened ??= Lincoln.open({ network: process.env.LINCOLN_NETWORK as NetworkName | undefined }).catch(e => { opened = null; throw e; }));
@@ -28,7 +29,7 @@ const fail = (e: unknown) => {
 };
 const run = async (f: (l: Lincoln) => Promise<unknown> | unknown) => { try { return ok(await f(await lincoln())); } catch (e) { return fail(e); } };
 
-const server = new McpServer({ name: 'lincoln', version: '0.1.0' }, { instructions: INSTRUCTIONS });
+const server = new McpServer({ name: 'lincoln', version: '0.1.1' }, { instructions: INSTRUCTIONS });
 const read = { readOnlyHint: true, openWorldHint: true } as const;
 
 server.registerTool('lincoln_balance', { title: 'Private balance', description: 'Ready (spendable now) and waiting balance per asset in this agent’s private Lincoln balance.', annotations: read },
@@ -41,6 +42,11 @@ server.registerTool('lincoln_policy', { title: 'Spending policy', description: '
   () => run(l => l.policy()));
 server.registerTool('lincoln_activity', { title: 'Recent spends', description: 'Recent spends from this wallet with their job IDs and status.', annotations: read },
   () => run(l => l.activity()));
+server.registerTool('lincoln_points', {
+  title: 'Season points',
+  description: 'LINCOLN season-1 points for this wallet\'s points ID: whether season points are on (policy.json seasonPoints, set only by the user), points, fee events, projected LINCOLN and receipts still to collect. Also posts receipts that are ready. Points are not tokens and not a promise of payout.',
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+}, () => run(l => l.points()));
 server.registerTool('lincoln_status', { title: 'Job status', description: 'Current state of a relay job started by this wallet. Check this before retrying a failed spend.', inputSchema: { jobId: z.string() }, annotations: read },
   ({ jobId }) => run(l => l.status(jobId)));
 
@@ -84,3 +90,14 @@ for (const [name, title, verb] of [
 }
 
 await server.connect(new StdioServerTransport());
+
+// Season points: while the server runs, post receipts of confirmed jobs once their relay has signed them (about a
+// minute after confirmation). Does nothing unless a tool opened the wallet, the user turned seasonPoints on and
+// receipts are pending.
+let collecting = false;
+setInterval(async () => {
+  // Only a wallet a tool call already opened: the timer never unlocks one on its own.
+  if (collecting || !opened) return;
+  collecting = true;
+  try { await (await lincoln()).collectPoints({ budgetMs: 45_000 }); } catch { /* next round */ } finally { collecting = false; }
+}, 60_000).unref();

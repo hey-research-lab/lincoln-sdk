@@ -4,7 +4,9 @@ import { POOLS, type PoolId } from './pools.js';
 
 export type JobKind = 'transact' | 'holderExit' | 'ragequit' | 'swap';
 export type JobStatus = 'preparing' | 'signed' | 'pending' | 'confirmed' | 'reverted' | 'cancelled';
-export interface RelayJob { id: string; kind: JobKind; routeId: string | null; status: JobStatus; nonce: number; hash?: string; blockNumber?: string; feeWei?: string; feeCeilingWei: string }
+export interface RelayJob { id: string; kind: JobKind; routeId: string | null; status: JobStatus; nonce: number; hash?: string; blockNumber?: string; feeWei?: string; feeCeilingWei: string;
+  /** Season points (core/season.ts), on jobs that named a claimant: the relay signs the receipt shortly after confirmation. */
+  pointsStatus?: string; pointsReceipt?: unknown }
 export type PublisherStatus = 'running' | 'paused' | 'blocked' | 'unknown';
 export interface RelayHealth {
   ok: boolean; blockNumber: string; relaySigning: boolean; normalSpendingReady: boolean; publicExitsReady: boolean;
@@ -116,7 +118,7 @@ async function callOnce<T>(pool: PoolId, path: string, body?: unknown): Promise<
 
 export const relayHealth = (pool: PoolId) => call<RelayHealth>(pool, '/readyz');
 export const relayState = (pool: PoolId) => call<any>(pool, '/v3/state');
-export const relayConfig = (pool: PoolId) => call<{ processor: string | null; relaySigning: boolean; serviceFees?: unknown; feeQuotes?: unknown }>(pool, '/v3/config');
+export const relayConfig = (pool: PoolId) => call<{ processor: string | null; relaySigning: boolean; serviceFees?: unknown; feeQuotes?: unknown; pointsReceipts?: { season?: string } | null }>(pool, '/v3/config');
 /** A fresh dynamic fee quote (only on relays whose /v3/config advertises feeQuotes). Not retried: each answer is a new offer. */
 export const requestFeeQuote = (pool: PoolId, r: { kind: FeeQuoteKind; grossAmount: bigint; outputCount: number; gasUnits?: bigint }) =>
   call<FeeQuote>(pool, '/v3/fees', { schema: 'lincoln-fee-request/v3', kind: r.kind, grossAmount: String(r.grossAmount), outputCount: r.outputCount, ...(r.gasUnits !== undefined ? { gasUnits: String(r.gasUnits) } : {}) });
@@ -129,7 +131,7 @@ export async function relayQuote(pool: PoolId, routeId: string, amountIn: bigint
 }
 
 export const newJobId = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(18)))).replace(/\+/g, '-').replace(/\//g, '_');
-export const submitJob = (pool: PoolId, job: { id: string; kind: JobKind; routeId?: string; feeQuoteId?: string; transaction: unknown }) => call<RelayJob>(pool, '/v3/jobs', job);
+export const submitJob = (pool: PoolId, job: { id: string; kind: JobKind; routeId?: string; feeQuoteId?: string; points?: { claimant: string }; transaction: unknown }) => call<RelayJob>(pool, '/v3/jobs', job);
 export const getJob = (pool: PoolId, id: string) => call<RelayJob>(pool, `/v3/jobs/${id}`);
 
 /** Whether a JOB_NOT_FOUND answer is the relay's considered verdict that the job was never created: every recovery

@@ -38,6 +38,7 @@ selectNetwork('mainnet', { rpc: 'http://127.0.0.1:9' });
 const { outputCount, recoveryOf, spend, exitNote } = await import('./operations.js');
 const { FEE_POLICY, billingGasPrice, estimateFee, feeBreakdown, forgetServiceFees, forgetBaseFee, gasEstimateBasis, gasEstimateUnavailable, loadServiceFees, parseGasPricing, parseServiceFees, priceFee, rememberQuotePrice, setBaseFeeReader, settleBaseFee } = await import('./fees.js');
 const { RelayError } = await import('./relay.js');
+const { pointsId, seasonClaim } = await import('./season.js');
 
 const pool = 'eth', info = POOLS[pool], profile = info.profile, account = sdk.createAccount('a1'.repeat(32)), self = sdk.receiverAddress(account, profile);
 const other = sdk.receiverAddress(sdk.createAccount('5c'.repeat(32)), profile);
@@ -49,7 +50,9 @@ const fixtures = {
     const commitments = notes.map(n => String(n.commitment)), leaves = commitments.map(c => String(sdk.associationLeaf(BigInt(c), profile)));
     return { root: String(sdk.buildMerkleTree(commitments.map(BigInt)).root), commitments, nullifiers: [], blockTimestamp: '1000',
       asp: { root: String(sdk.buildMerkleTree(leaves.map(BigInt)).root), epoch: '2', validUntil: '9999999999', leaves, expired: false },
-      receipts: notes.map((n, index) => ({ commitment: commitments[index], index, encryptedOutput: sdk.encryptReceipt(self, n, profile) })), deposits: [] };
+      receipts: notes.map((n, index) => ({ commitment: commitments[index], index, encryptedOutput: sdk.encryptReceipt(self, n, profile) })),
+      // Every note an original deposit from RECIPIENT, so a ragequit can be built.
+      deposits: notes.map((n, i) => ({ commitment: commitments[i], value: String(n.value), precommitment: '1', originalDepositor: RECIPIENT, transactionHash: '0x01', blockNumber: '1' })) };
   },
 };
 const V2 = { schema: 'lincoln-service-fees/v2', id: 'v2', gasFeeUnits: '20000000000000', withdrawal: { bps: 30, includesGas: true }, holderExit: { bps: 30, includesGas: true },
@@ -340,5 +343,58 @@ describe('an unknown base fee never decides admission', () => {
     forgetBaseFee(); await fresh(null, [ETH]);
     await settleBaseFee(pool, 'withdrawal', 10n ** 14n);
     expect(relay.quotes).toHaveLength(0);
+  });
+});
+
+describe('season points on relay jobs', () => {
+  const SEED = 'a1'.repeat(32), ID = pointsId(SEED);
+  /** The hooks Lincoln.execute builds: claim only while opted in, never for a ragequit, only on a relay signing season-1 receipts. */
+  const hooks = (optIn: boolean, confirmed: string[] = []) => ({
+    claim: (_pool: any, kind: any) => seasonClaim({ optIn, kind, seed: SEED, config: async () => relay.config }),
+    confirmed: (_pool: any, id: string) => { confirmed.push(id); },
+  });
+  const season = async (pointsReceipts: unknown) => { await fresh(PRICING, [ETH]); relay.config = { ...relay.config, pointsReceipts }; };
+
+  it('carries the points ID only when opted in and the relay advertises season-1, and reports the confirmed job', async () => {
+    const confirmed: string[] = [];
+    await season({ season: 'season-1' });
+    await withdraw(ETH, { points: hooks(true, confirmed) });
+    expect(relay.submits.at(-1).points).toEqual({ claimant: ID });
+    expect(confirmed).toEqual([relay.submits.at(-1).id]);
+    await season({ season: 'season-1' });
+    await send(ETH / 2n, { points: hooks(false, confirmed) });
+    expect(relay.submits.at(-1)).not.toHaveProperty('points');
+    for (const other of [null, undefined, { season: 'season-2' }]) {
+      await season(other);
+      await withdraw(ETH, { points: hooks(true, confirmed) });
+      expect(relay.submits.at(-1)).not.toHaveProperty('points');
+    }
+    await season({ season: 'season-1' });
+    await withdraw(ETH);
+    expect(relay.submits.at(-1)).not.toHaveProperty('points');
+    expect(confirmed).toHaveLength(1);
+  });
+  it('a ragequit never names the points ID; a holder exit does', async () => {
+    await season({ season: 'season-1' });
+    const note = sdk.recoverAccount(structuredClone(account), profile, fixtures.state([ETH]) as any).notes[0];
+    await exitNote({ account: structuredClone(account), pool, note, ragequit: true, onStage, points: hooks(true) } as any);
+    expect(relay.submits.at(-1).kind).toBe('ragequit');
+    expect(relay.submits.at(-1)).not.toHaveProperty('points');
+    await exitNote({ account: structuredClone(account), pool, note, recipient: RECIPIENT, onStage, points: hooks(true) } as any);
+    expect(relay.submits.at(-1).kind).toBe('holderExit');
+    expect(relay.submits.at(-1).points).toEqual({ claimant: ID });
+  });
+  it('a failing claim or confirm hook never fails the spend', async () => {
+    await season({ season: 'season-1' });
+    const r = await withdraw(ETH, { points: { claim: async () => { throw new Error('config unreachable'); }, confirmed: () => { throw new Error('unused'); } } });
+    expect(r.jobId).toBe(relay.submits.at(-1).id);
+    expect(relay.submits.at(-1)).not.toHaveProperty('points');
+    await season({ season: 'season-1' });
+    const sync = await withdraw(ETH, { points: { claim: () => { throw new Error('sync throw'); }, confirmed: () => undefined } });
+    expect(sync.hash).toBe('0xabc');
+    await season({ season: 'season-1' });
+    const late = await withdraw(ETH, { points: { claim: async () => ({ claimant: ID }), confirmed: async () => { throw new Error('disk full'); } } });
+    expect(late.hash).toBe('0xabc');
+    expect(relay.submits.at(-1).points).toEqual({ claimant: ID });
   });
 });
