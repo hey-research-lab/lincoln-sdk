@@ -29,7 +29,7 @@ const fail = (e: unknown) => {
 };
 const run = async (f: (l: Lincoln) => Promise<unknown> | unknown) => { try { return ok(await f(await lincoln())); } catch (e) { return fail(e); } };
 
-const server = new McpServer({ name: 'lincoln', version: '0.1.1' }, { instructions: INSTRUCTIONS });
+const server = new McpServer({ name: 'lincoln', version: '0.1.2' }, { instructions: INSTRUCTIONS });
 const read = { readOnlyHint: true, openWorldHint: true } as const;
 
 server.registerTool('lincoln_balance', { title: 'Private balance', description: 'Ready (spendable now) and waiting balance per asset in this agent’s private Lincoln balance.', annotations: read },

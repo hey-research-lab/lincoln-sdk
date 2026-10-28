@@ -36,7 +36,7 @@ const { POOLS, selectNetwork } = await import('./pools.js');
 // An unreachable RPC: no chain gas price until a quote supplies one, so first estimates use the policy cap.
 selectNetwork('mainnet', { rpc: 'http://127.0.0.1:9' });
 const { outputCount, recoveryOf, spend, exitNote } = await import('./operations.js');
-const { FEE_POLICY, billingGasPrice, estimateFee, feeBreakdown, forgetServiceFees, forgetBaseFee, gasEstimateBasis, gasEstimateUnavailable, loadServiceFees, parseGasPricing, parseServiceFees, priceFee, rememberQuotePrice, setBaseFeeReader, settleBaseFee } = await import('./fees.js');
+const { FEE_POLICY, TREASURY_SAFE, billingGasPrice, estimateFee, feeBreakdown, forgetServiceFees, forgetBaseFee, gasEstimateBasis, gasEstimateUnavailable, loadServiceFees, parseGasPricing, parseServiceFees, priceFee, rememberQuotePrice, setBaseFeeReader, settleBaseFee } = await import('./fees.js');
 const { RelayError } = await import('./relay.js');
 const { pointsId, seasonClaim } = await import('./season.js');
 
@@ -396,5 +396,29 @@ describe('season points on relay jobs', () => {
     const late = await withdraw(ETH, { points: { claim: async () => ({ claimant: ID }), confirmed: async () => { throw new Error('disk full'); } } });
     expect(late.hash).toBe('0xabc');
     expect(relay.submits.at(-1).points).toEqual({ claimant: ID });
+  });
+});
+
+describe('fee payee', () => {
+  // Season points count only fees the Safe received: a spend pays the payee the relay advertises, when it is one it accepts.
+  const payee = async (feeRecipient: unknown) => { await fresh(PRICING, [ETH]); relay.config = { ...relay.config, feeRecipient }; forgetServiceFees(pool); };
+  it('pays the Safe when the relay advertises it, on withdrawals, private sends and holder exits', async () => {
+    await payee(TREASURY_SAFE.toUpperCase().replace('0X', '0x'));
+    await withdraw(ETH);
+    expect(relay.submits.at(-1).transaction.extData.feeRecipient.toLowerCase()).toBe(TREASURY_SAFE);
+    await payee(TREASURY_SAFE);
+    await send(ETH / 2n);
+    expect(relay.submits.at(-1).transaction.extData.feeRecipient.toLowerCase()).toBe(TREASURY_SAFE);
+    await payee(TREASURY_SAFE);
+    const note = sdk.recoverAccount(structuredClone(account), profile, fixtures.state([ETH]) as any).notes[0];
+    await exitNote({ account: structuredClone(account), pool, note, recipient: RECIPIENT, onStage } as any);
+    expect(relay.submits.at(-1).transaction.data.feeRecipient.toLowerCase()).toBe(TREASURY_SAFE);
+  });
+  it('keeps the relay signer when the config is older, empty or names anyone else', async () => {
+    for (const advertised of [undefined, null, '', '0x1111111111111111111111111111111111111111']) {
+      await payee(advertised);
+      await withdraw(ETH);
+      expect(relay.submits.at(-1).transaction.extData.feeRecipient.toLowerCase(), String(advertised)).toBe(POOLS[pool].relayer.toLowerCase());
+    }
   });
 });

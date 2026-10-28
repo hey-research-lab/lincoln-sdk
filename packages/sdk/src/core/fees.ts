@@ -14,6 +14,7 @@
 // before proving, proves its totalFee and submits its quoteId (priceFee). Displayed fees are estimated
 // locally from the same public model (gas models, buffer, asset price) and the chain's current base fee.
 import { POOLS, publicClient, type PoolId } from './pools.js';
+import { NET } from './network.js';
 import { RelayError, relayConfig, requestFeeQuote, type FeeQuote, type FeeQuoteKind } from './relay.js';
 
 interface Part { bps: number; gas: boolean; fixed: bigint }
@@ -157,13 +158,27 @@ export function feeBreakdown(pool: PoolId, amount: bigint): FeeBreakdown {
   return { amount, fee, service: fee - gas, gas, receives: amount > fee ? amount - fee : 0n, policy, estimated: !!policy.dynamic };
 }
 
+/** The governance Safe, which the relay accepts as a fee payee next to its own signer since relay generation 14.
+ *  Season points count only fees the Safe received, so a fee paid to the signer earns none. */
+export const TREASURY_SAFE = '0x9cf17a6e3c75d200f58283a165c442a8a3994555';
+const FEE_RECIPIENT: Partial<Record<PoolId, string>> = {};
+/** Who a relayed spend's fee is paid to: the relay's advertised feeRecipient when it is one of the two payees the
+ *  relay accepts, else the relay's signer. It is part of the proof's external data, so it is fixed before proving. */
+export const feeRecipient = (pool: PoolId): string => FEE_RECIPIENT[pool] ?? POOLS[pool].relayer;
+function rememberFeeRecipient(pool: PoolId, advertised: unknown) {
+  const r = typeof advertised === 'string' ? advertised.toLowerCase() : null;
+  if (r && ((!NET.testnet && r === TREASURY_SAFE) || r === POOLS[pool]?.relayer?.toLowerCase())) FEE_RECIPIENT[pool] = r;
+  else delete FEE_RECIPIENT[pool];
+}
+
 const loading = new Map<PoolId, { at: number; promise: Promise<FeePolicy> }>();
 /** Loads the relay's fee schedule into FEE_POLICY: once per pool (for a minute under dynamic pricing, whose
  *  asset prices and availability change), retried after a failure. */
-export function loadServiceFees(pool: PoolId, fetchConfig: (pool: PoolId) => Promise<{ serviceFees?: unknown; feeQuotes?: unknown }> = relayConfig): Promise<FeePolicy> {
+export function loadServiceFees(pool: PoolId, fetchConfig: (pool: PoolId) => Promise<{ serviceFees?: unknown; feeQuotes?: unknown; feeRecipient?: string | null }> = relayConfig): Promise<FeePolicy> {
   const cached = loading.get(pool);
   if (!cached || (FEE_POLICY[pool]?.dynamic && Date.now() - cached.at > 60_000)) {
     const promise = fetchConfig(pool).then(async c => {
+      rememberFeeRecipient(pool, c.feeRecipient);
       const policy = parseServiceFees(c.serviceFees), dynamic = parseGasPricing(c.feeQuotes, POOLS[pool]?.asset ?? '');
       if (dynamic) { policy.dynamic = dynamic; await refreshGasPrice(); }
       return (FEE_POLICY[pool] = policy);
