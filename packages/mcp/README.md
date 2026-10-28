@@ -26,8 +26,10 @@ Other clients (Claude Desktop, Cursor and others):
 }
 ```
 
-Tools: `lincoln_balance`, `lincoln_address`, `lincoln_pools`, `lincoln_policy`, `lincoln_activity`, `lincoln_status`, `lincoln_quote`, and `lincoln_send` / `lincoln_swap` / `lincoln_withdraw` / `lincoln_deposit`, which take a `quoteId`, never raw amounts.
+Tools: `lincoln_balance`, `lincoln_address`, `lincoln_pools`, `lincoln_policy`, `lincoln_activity`, `lincoln_status`, `lincoln_points`, `lincoln_quote`, and `lincoln_send` / `lincoln_swap` / `lincoln_withdraw` / `lincoln_deposit`, which take a `quoteId`, never raw amounts.
 
 Spends are checked against `~/.lincoln/policy.json` (per-transaction, daily and approval limits). Those limits are enforced by this software, not by the contracts, so keep only what the agent needs in its balance.
+
+Season points are off unless the user sets `"seasonPoints": true` in `policy.json`; the server never changes it. While on, fee-paying spends name the wallet's points ID and the server posts their receipts every minute. The points service publishes points per ID, so those spends become linkable to each other (not to the public wallet). Points are not tokens and not a promise of payout. Rules: https://docs.lincolnprotocol.com/token/points
 
 Docs: https://docs.lincolnprotocol.com/developers/agents · Source: https://github.com/lincoln-protocol/sdk · Terms: https://docs.lincolnprotocol.com/legal/terms

@@ -13,9 +13,11 @@ import { POOLS, chain, explorerTx, findPool, publicClient, selectNetwork, type P
 import { loadPoolState } from './core/state.js';
 import { RelayError, getJob, quoteMinOut, quoteOut, relayConfig, relayHealth, type Quote as RelayQuote } from './core/relay.js';
 import { exitFee, feePolicy, loadServiceFees, relayFee, settleBaseFee, transferFee } from './core/fees.js';
-import { deposit, getQuote, inspect, spend, swap, type OpStage } from './core/operations.js';
+import { deposit, getQuote, inspect, spend, swap, type OpStage, type PointsHooks } from './core/operations.js';
 import { setCircuitCache } from './core/prover.js';
 import { createKey, readKeyFile, unlockKey, walletKeys, writePrivate } from './core/keystore.js';
+import { readJson, readSealed, writeSealed } from './core/sealed.js';
+import { POINTS_RULES, SEASON_ENDS, SEASON_ID, accountPoints, allocation, collectPending, pointsApi, pointsId, seasonClaim, within, type CollectSummary, type PendingReceipt } from './core/season.js';
 import { decodeReceiver, encodeReceivers } from './core/receiver-code.js';
 import { checkPolicy, readPolicy, writeDefaultPolicy, type Policy } from './core/policy.js';
 import { usdPrice } from './core/prices.js';
@@ -64,7 +66,23 @@ export interface QuoteRecord {
   notes: string[];
 }
 
-export interface ExecResult { quoteId: string; action: Action; jobId?: string; txHash: string; explorer: string; bridge?: { status: string; txHashes?: string[]; depositAddress?: string }; message: string }
+export interface ExecResult { quoteId: string; action: Action; jobId?: string; txHash: string; explorer: string; bridge?: { status: string; txHashes?: string[]; depositAddress?: string }; message: string;
+  /** Present when the job named this wallet's points ID (policy seasonPoints): its receipt is collected later. */
+  points?: { claimant: string } }
+
+/** Season points standing for this wallet's points ID (`lincoln points`). */
+export interface PointsReport {
+  season: string; seasonEnds: string; pointsId: string;
+  /** policy.json `seasonPoints`: whether fee-paying relay jobs name the points ID. Only the user changes it. */
+  seasonPoints: boolean;
+  /** Receipts still to collect, after this call's collection pass (`collected`). */
+  pending: number; collected: CollectSummary | null;
+  /** From the points service; null when it could not be read (`error`). */
+  points: string | null; feeEvents: number | null;
+  /** Projected LINCOLN for the season so far (allocation units at 18 decimals); a preview until the season closes. */
+  projectedLincoln: string | null; projectedUnits: string | null; preview: boolean | null;
+  error?: string; rules: string; note: string;
+}
 interface ActivityRow { at: string; quoteId: string; action: Action; pool: string; asset: string; amount: string; usd: number | null; jobId?: string; txHash?: string; status: 'submitted' | 'confirmed' | 'failed'; error?: string }
 
 const DYNAMIC_FEE_NOTE = 'The gas part of the fee is an estimate: the relay prices gas per transaction and fixes it when the spend is sent (execute stops if it rises much).';
@@ -84,20 +102,12 @@ const parseAmount = (amount: string, pool: PoolInfo) => {
 
 export function paths(home: string, network: NetworkName) {
   const dir = join(home, network);
-  return { dir, key: join(dir, 'agent.json'), notes: join(dir, 'notes.json'), quotes: join(dir, 'quotes.json'), activity: join(dir, 'activity.json'), policy: join(home, 'policy.json'), circuits: join(home, 'circuits') };
+  return { dir, key: join(dir, 'agent.json'), notes: join(dir, 'notes.json'), quotes: join(dir, 'quotes.json'), activity: join(dir, 'activity.json'), pointsPending: join(dir, 'points-pending.json'), policy: join(home, 'policy.json'), circuits: join(home, 'circuits') };
 }
 const defaultHome = () => process.env.LINCOLN_HOME?.replace(/^~(?=$|\/)/, homedir()) ?? join(homedir(), '.lincoln');
-const readJson = async <T,>(file: string, fallback: T): Promise<T> => { const t = await readFile(file, 'utf8').catch(() => null); return t ? JSON.parse(t) as T : fallback; };
-// Quotes and activity name amounts, recipients and job IDs: kept encrypted with the wallet's cache key, like notes.
-async function readSealed<T>(file: string, key: Uint8Array, fallback: T): Promise<T> {
-  const box = await readJson<{ iv?: string; data?: string } | T>(file, fallback);
-  if (!box || typeof box !== 'object' || !('iv' in box) || !('data' in box)) return (box as T) ?? fallback; // legacy plain file
-  try { return JSON.parse(new TextDecoder().decode(gcm(key, sdk.fromHex(box.iv!)).decrypt(sdk.fromHex(box.data!)))) as T; } catch { return fallback; }
-}
-async function writeSealed(file: string, key: Uint8Array, value: unknown) {
-  const iv = randomBytes(12);
-  await writePrivate(file, JSON.stringify({ iv: sdk.toHex(iv), data: sdk.toHex(gcm(key, iv).encrypt(new TextEncoder().encode(JSON.stringify(value)))) }));
-}
+const POINTS_NOTE = 'Season points are not tokens and not a promise of payout. Rules: ' + POINTS_RULES;
+/** How long a spend waits for the relay's points config before going ahead without points. */
+const CLAIM_TIMEOUT_MS = 10_000;
 
 export class Lincoln {
   private constructor(
@@ -144,6 +154,9 @@ export class Lincoln {
   get privateAddress(): string { return encodeReceivers(Object.values(POOLS).map(p => sdk.receiverAddress(this.account, p.profile))); }
   get pools() { return Object.values(POOLS).map(p => ({ id: p.id, asset: p.symbol, kind: p.kind, decimals: p.decimals, address: p.profile.pool.address, routes: p.routes.map(r => POOLS[r.target]?.symbol ?? r.target) })); }
   policy(): Promise<Policy> { return readPolicy(this.files.policy); }
+  /** This wallet's season points ID: derived from the private wallet's seed (the same as in the web app), not the
+   *  public wallet. Relay jobs name it only while the user's policy.json has `seasonPoints: true`. */
+  get pointsId(): string { return pointsId(this.account.seed); }
 
   private async persistNotes(account: sdk.Account) {
     const iv = randomBytes(12);
@@ -336,7 +349,8 @@ export class Lincoln {
     if (Date.parse(q.expiresAt) < Date.now()) throw new LincolnError('QUOTE_EXPIRED', `Quote ${id} expired. Quote again.`);
     const used = (await readSealed<ActivityRow[]>(this.files.activity, this.cacheKey, [])).find(r => r.quoteId === id && r.status !== 'failed');
     if (used) throw new LincolnError('QUOTE_USED', `Quote ${id} was already executed${used.jobId ? ` (job ${used.jobId})` : ''}. Check its status instead of executing again.`);
-    const check = checkPolicy(await this.policy(), { action: q.action, usd: q.usd, recipient: q.to, spentTodayUsd: await this.spentTodayUsd() });
+    const policy = await this.policy();
+    const check = checkPolicy(policy, { action: q.action, usd: q.usd, recipient: q.to, spentTodayUsd: await this.spentTodayUsd() });
     if (!check.allowed) throw new LincolnError(check.code!, check.reason!);
     if (check.needsApproval && !approved) throw new LincolnError('APPROVAL_REQUIRED', q.usd === null
       ? 'This asset has no USD price, so the spend needs the user’s approval.'
@@ -350,22 +364,25 @@ export class Lincoln {
       ? new LincolnError('QUOTE_MOVED', `The relay fee rose above ${fmt(maxFee, pool.decimals)} ${q.asset}. Quote again.`) : e;
     const row: ActivityRow = { at: new Date().toISOString(), quoteId: id, action: q.action, pool: q.pool, asset: q.asset, amount: q.amount, usd: q.usd, status: 'submitted' };
     const persist = (a: sdk.Account) => this.persistNotes(a);
+    const points = this.pointsHooks(policy.seasonPoints);
+    let claimed: { claimant: string } | undefined;
+    const tracked: PointsHooks = { claim: async (p, kind) => (claimed = (await points.claim(p, kind)) ?? undefined) ?? null, confirmed: points.confirmed };
     const submitted = (ref: { jobId?: string; hash?: string }) => { Object.assign(row, ref.jobId ? { jobId: ref.jobId } : {}, ref.hash ? { txHash: ref.hash } : {}); void this.record(row); onSubmitted?.(ref); };
     try {
       let result: { hash: Hex; jobId?: string }, bridge: ExecResult['bridge'], message: string;
       if (q.action === 'send') {
         const receiver = decodeReceiver(q.to!, q.pool);
-        result = await spend({ account: this.account, pool: q.pool, amount: raw, receiver, maxFee, onStage, persist, onSubmitted: submitted }).catch(e => { throw limit(e); });
+        result = await spend({ account: this.account, pool: q.pool, amount: raw, receiver, maxFee, onStage, persist, onSubmitted: submitted, points: tracked }).catch(e => { throw limit(e); });
         message = `Sent ${q.amount} ${q.asset} privately.`;
       } else if (q.action === 'withdraw' && !q.chain) {
-        result = await spend({ account: this.account, pool: q.pool, amount: raw, recipient: q.to, maxFee, onStage, persist, onSubmitted: submitted }).catch(e => { throw limit(e); });
+        result = await spend({ account: this.account, pool: q.pool, amount: raw, recipient: q.to, maxFee, onStage, persist, onSubmitted: submitted, points: tracked }).catch(e => { throw limit(e); });
         message = `Withdrew ${q.receives} ${q.asset} to ${q.to}.`;
       } else if (q.action === 'withdraw' && findIntentChain(q.chain!)) {
         if (!bridgeLive()) throw new LincolnError('BRIDGE_TESTNET', 'Cross-chain withdrawals work on Robinhood Chain mainnet only.');
         const intent = findIntentChain(q.chain!)!, route = intentRoute(pool, intent, q.receivesAsset)!;
         // The NEAR Intents order is placed only once the withdrawal's final fee is known, for exactly what it delivers.
         const held: { live?: Awaited<ReturnType<typeof quoteIntent>> } = {};
-        result = await spend({ account: this.account, pool: q.pool, amount: raw, maxFee, onStage, persist, onSubmitted: submitted, recipient: async fee => {
+        result = await spend({ account: this.account, pool: q.pool, amount: raw, maxFee, onStage, persist, onSubmitted: submitted, points: tracked, recipient: async fee => {
           const live = await quoteIntent({ route, amount: raw - fee, recipient: q.to!, refundTo: q.refund!, dry: false }).catch(e => { throw new LincolnError('BRIDGE_UNAVAILABLE', (e as Error).message); });
           if (!live.depositAddress) throw new LincolnError('BRIDGE_UNAVAILABLE', 'NEAR Intents did not return a deposit address.');
           if (q.minReceives && BigInt(live.amountOut) < parseUnits(q.minReceives, route.decimals)) throw new LincolnError('QUOTE_MOVED', `NEAR Intents now pays ${live.amountOutFormatted} ${route.symbol}, below the quoted minimum. Quote again.`);
@@ -386,7 +403,7 @@ export class Lincoln {
         const target = findChain(q.chain!)!;
         // The bridge order is placed only once the withdrawal's final fee is known, for exactly what it delivers.
         const held: { live?: Awaited<ReturnType<typeof quoteBridge>> } = {};
-        result = await spend({ account: this.account, pool: q.pool, amount: raw, maxFee, onStage, persist, onSubmitted: submitted, recipient: async fee => {
+        result = await spend({ account: this.account, pool: q.pool, amount: raw, maxFee, onStage, persist, onSubmitted: submitted, points: tracked, recipient: async fee => {
           const live = await quoteBridge({ pool, dest: target, receive: q.receivesAsset, amount: raw - fee, recipient: q.to!, refundTo: q.refund ?? q.to!, live: true });
           if (!live.depositAddress || !live.requestId) throw new LincolnError('BRIDGE_UNAVAILABLE', 'The bridge did not return a deposit address.');
           if (q.minReceives && Number(live.amountOutFormatted) < Number(q.minReceives)) throw new LincolnError('QUOTE_MOVED', `The bridge now pays ${live.amountOutFormatted}, below the quoted minimum. Quote again.`);
@@ -403,7 +420,7 @@ export class Lincoln {
       } else if (q.action === 'swap') {
         const fresh = await getQuote(q.pool, q.routeId!, raw, q.relayQuote!.slippageBPS);
         if (quoteOut(fresh) < quoteMinOut(q.relayQuote!)) throw new LincolnError('QUOTE_MOVED', 'The price moved below the quoted minimum. Quote again.');
-        result = await swap({ account: this.account, pool: q.pool, routeId: q.routeId!, quote: fresh, onStage, persist, onSubmitted: submitted });
+        result = await swap({ account: this.account, pool: q.pool, routeId: q.routeId!, quote: fresh, onStage, persist, onSubmitted: submitted, points: tracked });
         message = `Swapped ${q.amount} ${q.asset} for at least ${q.minReceives} ${q.receivesAsset}, privately. It is ready to spend in about a minute.`;
       } else {
         const wallet = createWalletClient({ account: this.signer, chain, transport: http(this.net.rpc) });
@@ -412,7 +429,7 @@ export class Lincoln {
       }
       Object.assign(row, { status: 'confirmed', txHash: result.hash, ...(result.jobId ? { jobId: result.jobId } : {}) });
       await this.record(row);
-      return { quoteId: id, action: q.action, jobId: result.jobId, txHash: result.hash, explorer: explorerTx(result.hash), bridge, message };
+      return { quoteId: id, action: q.action, jobId: result.jobId, txHash: result.hash, explorer: explorerTx(result.hash), bridge, message, ...(claimed ? { points: claimed } : {}) };
     } catch (e) {
       // A job that may still run is not a failure: keep it as submitted so its status can be followed.
       const mayRun = e instanceof RelayError ? e.mayHaveRun : /Still pending/.test((e as Error).message);
@@ -430,6 +447,56 @@ export class Lincoln {
     if (!row) throw new LincolnError('UNKNOWN_JOB', `No job ${jobId} in this wallet's activity.`);
     const job = await getJob(row.pool, jobId);
     return { jobId, action: row.action, asset: row.asset, amount: row.amount, status: job.status, txHash: job.hash, explorer: job.hash ? explorerTx(job.hash) : undefined };
+  }
+
+  // Season points. Pending receipts are kept encrypted like activity (they name job IDs); updates go through one chain
+  // per wallet object, so a spend's new entry and a collection pass never overwrite each other.
+  private pendingChain: Promise<unknown> = Promise.resolve();
+  private readPending() { return readSealed<PendingReceipt[]>(this.files.pointsPending, this.cacheKey, []); }
+  private updatePending(f: (list: PendingReceipt[]) => PendingReceipt[]): Promise<PendingReceipt[]> {
+    const next = this.pendingChain.then(async () => { const list = f(await this.readPending()); await writeSealed(this.files.pointsPending, this.cacheKey, list); return list; });
+    this.pendingChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /** The hooks a relayed spend uses: name the points ID while `optIn`, on mainnet relays that sign season receipts. */
+  private pointsHooks(optIn: boolean): PointsHooks {
+    return {
+      claim: (pool, kind) => this.net.testnet ? Promise.resolve(null)
+        : within(seasonClaim({ optIn, kind, seed: this.account.seed, config: () => relayConfig(pool) }), CLAIM_TIMEOUT_MS),
+      confirmed: async (pool, jobId) => { await this.updatePending(l => [...l.filter(e => e.jobId !== jobId), { pool, jobId, at: Date.now() }]); },
+    };
+  }
+
+  /** Posts the season points receipts of confirmed jobs once their relay has signed them (about a minute after
+   *  confirmation). Retries every `retryEveryMs` until `budgetMs` runs out (default: one pass of at most 20 s); what is
+   *  still waiting stays in points-pending.json for the next call. Never throws over a receipt. Nothing is posted while
+   *  policy.json has seasonPoints off. */
+  async collectPoints({ budgetMs = 20_000, retryEveryMs = 0 }: { budgetMs?: number; retryEveryMs?: number } = {}): Promise<CollectSummary> {
+    const optIn = (await this.policy().catch(() => null))?.seasonPoints === true;
+    const pending = (await this.readPending()).length;
+    if (!optIn || !pending) return { credited: 0, settled: 0, pending };
+    return collectPending({ read: () => this.readPending(), write: list => this.updatePending(() => list).then(() => undefined) },
+      { api: pointsApi(this.net.app), getJob: (pool, id) => getJob(pool, id), now: Date.now }, { budgetMs, retryEveryMs, update: f => this.updatePending(f) });
+  }
+
+  /** Season points for this wallet's points ID: runs a collection pass, then reads points and the projected LINCOLN
+   *  allocation from the points service. */
+  async points({ budgetMs = 20_000 }: { budgetMs?: number } = {}): Promise<PointsReport> {
+    const seasonPoints = (await this.policy()).seasonPoints, id = this.pointsId;
+    const collected = seasonPoints ? await this.collectPoints({ budgetMs }).catch(() => null) : null;
+    const pending = collected?.pending ?? (await this.readPending()).length;
+    const base = { season: SEASON_ID, seasonEnds: SEASON_ENDS, pointsId: id, seasonPoints, pending, collected, rules: POINTS_RULES, note: POINTS_NOTE };
+    const none = { points: null, feeEvents: null, projectedLincoln: null, projectedUnits: null, preview: null };
+    if (this.net.testnet) return { ...base, ...none, error: 'Season points are earned on mainnet only.' };
+    const api = pointsApi(this.net.app);
+    try {
+      const [standing, alloc] = await Promise.all([accountPoints(api, id), allocation(api, id)]);
+      return { ...base, points: standing.points, feeEvents: standing.feeEvents, projectedUnits: alloc.units,
+        projectedLincoln: fmt(BigInt(alloc.units), alloc.budget?.decimals ?? 18), preview: alloc.preview };
+    } catch (e) {
+      return { ...base, ...none, error: `Points service unavailable: ${(e as Error).message}` };
+    }
   }
 
   /** Public chain view of the agent wallet: native ETH for gas and deposits. */

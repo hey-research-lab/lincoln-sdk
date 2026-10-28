@@ -1,6 +1,6 @@
 {
   "name": "lincoln",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A private balance on Robinhood Chain for Claude: send, swap and withdraw ETH, USDG and tokenized stocks with zero-knowledge proofs made on your machine.",
   "author": {
     "name": "Lincoln Protocol",
