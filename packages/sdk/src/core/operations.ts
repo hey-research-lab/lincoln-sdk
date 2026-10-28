@@ -7,7 +7,7 @@ import { POOLS, POOL_ABI, chain, publicClient, type PoolId } from './pools.js';
 import { loadPoolState, type PoolState } from './state.js';
 import { RETRYABLE, RelayError, newJobId, notCreated, relayQuote, submitJob, waitForJob, type FeeQuoteKind, type JobKind, type Quote } from './relay.js';
 import { prove, type Circuit, type ProofStage } from './prover.js';
-import { estimateFee, forgetServiceFees, priceFee, quoteLive, quotedRawGas, type PricedFee } from './fees.js';
+import { estimateFee, feeRecipient, forgetServiceFees, loadServiceFees, priceFee, quoteLive, quotedRawGas, type PricedFee } from './fees.js';
 import { minChangeFor } from './denominations.js';
 
 export type OpStage = 'sync' | 'prepare' | ProofStage | 'save' | 'sign' | 'relay' | 'confirm' | 'done';
@@ -94,6 +94,9 @@ async function relayed(pool: PoolId, kind: JobKind, circuit: Circuit, { onStage,
 ): Promise<OpResult> {
   // A pool whose relay is not configured yet (relayer null in its profile) takes deposits only.
   if (!POOLS[pool].relayer) throw new RelayError('RELAY_NOT_LIVE');
+  // The relay's config names the fee payee (feeRecipient); read it before anything is built and proved. A quote
+  // passed in as a hint can skip pricing, so this does not rely on it. Unreachable config: the signer stays the payee.
+  if (pricing) await loadServiceFees(pool).catch(() => undefined);
   // One ID per transaction: reused while the relay confirms it never stored a job, replaced only after a proven stop.
   let id = newJobId();
   let priced: PricedFee | null = pricing?.hint ?? null, floor = 0n, locked: bigint | null = null;
@@ -211,7 +214,7 @@ export async function spend({ account, pool, amount, recipient, receiver, fee: h
       // A private send's fee is its only public output and pays the relayer, so nothing goes to a
       // recipient; the relay still requires a non-zero one whenever there is a public output, so a
       // fee-paying send names the relayer (the same for every send: nothing to link).
-      externalData: { recipient: receiver ? (fee > 0n ? info.relayer : ZERO) : to ?? ZERO, feeRecipient: fee > 0n ? info.relayer : ZERO, processor: info.relayer, publicIn: 0n, publicOut: receiver ? fee : amount, fee },
+      externalData: { recipient: receiver ? (fee > 0n ? info.relayer : ZERO) : to ?? ZERO, feeRecipient: fee > 0n ? feeRecipient(pool) : ZERO, processor: info.relayer, publicIn: 0n, publicOut: receiver ? fee : amount, fee },
     });
     return {
       prepared, transaction: proof => sdk.publicTransaction(prepared, proof),
@@ -227,7 +230,7 @@ export async function exitNote({ account, pool, note, recipient, ragequit = fals
   return relayed(pool, ragequit ? 'ragequit' : 'holderExit', 'holder-exit', { onStage, onSubmitted, points }, (state, fee) => {
     const prepared = ragequit
       ? sdk.prepareRagequit({ account, profile: info.profile, note, state, processor: info.relayer })
-      : sdk.prepareHolderExit({ account, profile: info.profile, note, state, externalData: { processor: info.relayer, recipient: recipient!, feeRecipient: fee > 0n ? info.relayer : ZERO, fee } });
+      : sdk.prepareHolderExit({ account, profile: info.profile, note, state, externalData: { processor: info.relayer, recipient: recipient!, feeRecipient: fee > 0n ? feeRecipient(pool) : ZERO, fee } });
     return { prepared, transaction: proof => sdk.publicHolderExitTransaction(prepared, proof) };
   }, ragequit ? undefined : { kind: 'holder-exit', gross: note.value });
 }

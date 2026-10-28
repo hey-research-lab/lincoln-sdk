@@ -1,6 +1,6 @@
 {
   "name": "@lincolnprotocol/mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "Apache-2.0",
   "description": "MCP server for Lincoln: give an AI agent a private balance on Robinhood Chain.",
   "mcpName": "io.github.lincoln-protocol/lincoln",
@@ -34,7 +34,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@lincolnprotocol/sdk": "0.1.1",
+    "@lincolnprotocol/sdk": "0.1.2",
     "@modelcontextprotocol/sdk": "1.30.1",
     "zod": "4.6.5"
   },
