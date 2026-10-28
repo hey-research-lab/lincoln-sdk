@@ -481,7 +481,7 @@ export class Lincoln {
   }
 
   /** Season points for this wallet's points ID: runs a collection pass, then reads points and the projected LINCOLN
-   *  allocation from the points service. */
+   *  allocation from the points service. With seasonPoints off it reports that and contacts nothing. */
   async points({ budgetMs = 20_000 }: { budgetMs?: number } = {}): Promise<PointsReport> {
     const seasonPoints = (await this.policy()).seasonPoints, id = this.pointsId;
     const collected = seasonPoints ? await this.collectPoints({ budgetMs }).catch(() => null) : null;
@@ -489,6 +489,8 @@ export class Lincoln {
     const base = { season: SEASON_ID, seasonEnds: SEASON_ENDS, pointsId: id, seasonPoints, pending, collected, rules: POINTS_RULES, note: POINTS_NOTE };
     const none = { points: null, feeEvents: null, projectedLincoln: null, projectedUnits: null, preview: null };
     if (this.net.testnet) return { ...base, ...none, error: 'Season points are earned on mainnet only.' };
+    // Off: don't show the points service this ID (with this machine's IP) at all.
+    if (!seasonPoints) return { ...base, ...none, error: 'Season points are off. The user turns them on with "seasonPoints": true in policy.json.' };
     const api = pointsApi(this.net.app);
     try {
       const [standing, alloc] = await Promise.all([accountPoints(api, id), allocation(api, id)]);

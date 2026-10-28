@@ -25,10 +25,11 @@ async function wallet(seasonPoints: boolean | undefined) {
   await writeFile(join(home, 'policy.json'), JSON.stringify(seasonPoints === undefined ? rest : { ...rest, seasonPoints }));
   return { home, lincoln: await Lincoln.open({ network: 'mainnet', home }) };
 }
-const posts: { url: string; body?: unknown }[] = [];
+const posts: { url: string; body?: unknown }[] = [], reads: string[] = [];
 function service({ receipt = 200 }: { receipt?: number } = {}) {
-  posts.length = 0;
+  posts.length = 0; reads.length = 0;
   vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+    if (init?.method !== 'POST') reads.push(url);
     if (init?.method === 'POST') { posts.push({ url, body: JSON.parse(String(init.body)) }); return Response.json(receipt === 200 ? { ok: true } : { error: 'FEE_EVENT_NOT_INDEXED' }, { status: receipt }); }
     if (url.includes('/points/0x')) return Response.json({ season: 'season-1', points: '12.500000', feeEvents: 3, blockNumber: '1' });
     if (url.includes('/allocation/')) return Response.json({ units: '1234500000000000000000', preview: true, budget: { units: '1', decimals: 18, symbol: 'LINCOLN' } });
@@ -60,7 +61,7 @@ describe('Lincoln season points', () => {
     expect(await lincoln.collectPoints()).toEqual({ credited: 2, settled: 0, pending: 0 });
     expect(posts.map(p => p.url)).toEqual(['https://app.lincolnprotocol.com/points/receipts', 'https://app.lincolnprotocol.com/points/receipts']);
   });
-  it('posts nothing while season points are off, and reports the standing', async () => {
+  it('posts nothing while season points are off, and does not ask the points service about the ID', async () => {
     const { lincoln } = await wallet(undefined);
     await (lincoln as any).pointsHooks(true).confirmed('eth', 'job-9');
     relay.job = { status: 'confirmed', pointsStatus: 'issued', pointsReceipt: { claimant: ID } };
@@ -68,7 +69,9 @@ describe('Lincoln season points', () => {
     expect(await lincoln.collectPoints()).toEqual({ credited: 0, settled: 0, pending: 1 });
     expect(posts).toHaveLength(0);
     const r = await lincoln.points();
-    expect(r).toMatchObject({ season: 'season-1', pointsId: ID, seasonPoints: false, pending: 1, collected: null, points: '12.500000', feeEvents: 3, projectedLincoln: '1234.5', preview: true });
+    expect(r).toMatchObject({ season: 'season-1', pointsId: ID, seasonPoints: false, pending: 1, collected: null, points: null, projectedLincoln: null });
+    expect(r.error).toMatch(/seasonPoints/);
+    expect(reads.filter(u => u.includes(ID))).toHaveLength(0);
     expect(r.note).toMatch(/not tokens and not a promise of payout/);
   });
   it('a points service refusal keeps the receipt for later', async () => {

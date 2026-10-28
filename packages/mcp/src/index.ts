@@ -92,10 +92,12 @@ for (const [name, title, verb] of [
 await server.connect(new StdioServerTransport());
 
 // Season points: while the server runs, post receipts of confirmed jobs once their relay has signed them (about a
-// minute after confirmation). Does nothing unless the user turned seasonPoints on and receipts are pending.
+// minute after confirmation). Does nothing unless a tool opened the wallet, the user turned seasonPoints on and
+// receipts are pending.
 let collecting = false;
 setInterval(async () => {
-  if (collecting) return;
+  // Only a wallet a tool call already opened: the timer never unlocks one on its own.
+  if (collecting || !opened) return;
   collecting = true;
   try { await (await lincoln()).collectPoints({ budgetMs: 45_000 }); } catch { /* next round */ } finally { collecting = false; }
 }, 60_000).unref();
